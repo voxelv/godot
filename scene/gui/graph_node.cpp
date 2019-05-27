@@ -29,8 +29,15 @@
 /*************************************************************************/
 
 #include "graph_node.h"
+#include "core/os/os.h"
 
 #include "core/method_bind_ext.gen.inc"
+
+struct _MinSizeCache {
+	int min_size;
+	bool will_stretch;
+	int final_size;
+};
 
 bool GraphNode::_set(const StringName &p_name, const Variant &p_value) {
 
@@ -117,51 +124,141 @@ void GraphNode::_get_property_list(List<PropertyInfo> *p_list) const {
 
 void GraphNode::_resort() {
 
+	/** First pass, determine minimum size AND amount of stretchable elements */
+
+	Size2i new_size;
+
 	int sep = get_constant("separation");
 	Ref<StyleBox> sb = get_stylebox("frame");
-	bool first = true;
+	new_size.x = get_size().x - sb->get_minimum_size().x;
+	new_size.y = get_size().y - sb->get_minimum_size().y;
 
-	Size2 minsize;
+	bool first = true;
+	int children_count = 0;
+	int stretch_min = 0;
+	int stretch_avail = 0;
+	float stretch_ratio_total = 0;
+	Map<Control *, _MinSizeCache> min_size_cache;
+
+	cache_y.clear();
 
 	for (int i = 0; i < get_child_count(); i++) {
 		Control *c = Object::cast_to<Control>(get_child(i));
-		if (!c)
+		if (!c || !c->is_visible_in_tree())
 			continue;
 		if (c->is_set_as_toplevel())
 			continue;
 
 		Size2i size = c->get_combined_minimum_size();
+		_MinSizeCache msc;
 
-		minsize.y += size.y;
-		minsize.x = MAX(minsize.x, size.x);
+		stretch_min += size.height;
+		msc.min_size = size.height;
+		msc.will_stretch = c->get_v_size_flags() & SIZE_EXPAND;
+
+		if (msc.will_stretch) {
+			stretch_avail += msc.min_size;
+			stretch_ratio_total += c->get_stretch_ratio();
+		}
+		msc.final_size = msc.min_size;
+		min_size_cache[c] = msc;
+		children_count++;
+	}
+
+	if (children_count == 0)
+		return;
+
+	int stretch_max = new_size.height - (children_count - 1) * sep;
+	int stretch_diff = stretch_max - stretch_min;
+	if (stretch_diff < 0) {
+		//avoid negative stretch space
+		stretch_max = stretch_min;
+		stretch_diff = 0;
+	}
+
+	stretch_avail += stretch_diff; //available stretch space.
+	/** Second, pass sucessively to discard elements that can't be stretched, this will run while stretchable
+		elements exist */
+
+	while (stretch_ratio_total > 0) { // first of all, don't even be here if no stretchable objects exist
+
+		bool refit_successful = true; //assume refit-test will go well
+
+		for (int i = 0; i < get_child_count(); i++) {
+			Control *c = Object::cast_to<Control>(get_child(i));
+			if (!c || !c->is_visible_in_tree())
+				continue;
+			if (c->is_set_as_toplevel())
+				continue;
+
+			ERR_FAIL_COND(!min_size_cache.has(c));
+			_MinSizeCache &msc = min_size_cache[c];
+
+			if (msc.will_stretch) { //wants to stretch
+				//let's see if it can really stretch
+
+				int final_pixel_size = stretch_avail * c->get_stretch_ratio() / stretch_ratio_total;
+				if (final_pixel_size < msc.min_size) {
+					//if available stretching area is too small for widget,
+					//then remove it from stretching area
+					msc.will_stretch = false;
+					stretch_ratio_total -= c->get_stretch_ratio();
+					refit_successful = false;
+					stretch_avail -= msc.min_size;
+					msc.final_size = msc.min_size;
+					break;
+				} else {
+					msc.final_size = final_pixel_size;
+				}
+			}
+		}
+
+		if (refit_successful) //uf refit went well, break
+			break;
+	}
+
+	/** Final pass, draw and stretch elements **/
+
+	int ofs = 0;
+	first = true;
+	int idx = 0;
+
+	for (int i = 0; i < get_child_count(); i++) {
+
+		Control *c = Object::cast_to<Control>(get_child(i));
+		if (!c || !c->is_visible_in_tree())
+			continue;
+		if (c->is_set_as_toplevel())
+			continue;
+
+		_MinSizeCache &msc = min_size_cache[c];
 
 		if (first)
 			first = false;
 		else
-			minsize.y += sep;
-	}
+			ofs += sep;
 
-	int vofs = 0;
-	int w = get_size().x - sb->get_minimum_size().x;
+		int from = ofs;
+		int to = ofs + msc.final_size;
 
-	cache_y.clear();
-	for (int i = 0; i < get_child_count(); i++) {
-		Control *c = Object::cast_to<Control>(get_child(i));
-		if (!c)
-			continue;
-		if (c->is_set_as_toplevel())
-			continue;
+		if (msc.will_stretch && idx == children_count - 1) {
+			//adjust so the last one always fits perfect
+			//compensating for numerical imprecision
 
-		Size2i size = c->get_combined_minimum_size();
+			to = new_size.height;
+		}
 
-		Rect2 r(sb->get_margin(MARGIN_LEFT), sb->get_margin(MARGIN_TOP) + vofs, w, size.y);
+		int size = to - from;
 
-		fit_child_in_rect(c, r);
-		cache_y.push_back(vofs + size.y * 0.5);
+		Rect2 rect;
 
-		if (vofs > 0)
-			vofs += sep;
-		vofs += size.y;
+		rect = Rect2(sb->get_margin(MARGIN_LEFT), sb->get_margin(MARGIN_TOP) + from, new_size.width, size);
+
+		fit_child_in_rect(c, rect);
+		cache_y.push_back(from + size * 0.5);
+
+		ofs = to;
+		idx++;
 	}
 
 	update();
@@ -466,12 +563,10 @@ bool GraphNode::is_close_button_visible() const {
 void GraphNode::_connpos_update() {
 
 	int edgeofs = get_constant("port_offset");
-	int sep = get_constant("separation");
 
 	Ref<StyleBox> sb = get_stylebox("frame");
 	conn_input_cache.clear();
 	conn_output_cache.clear();
-	int vofs = 0;
 
 	int idx = 0;
 
@@ -481,33 +576,25 @@ void GraphNode::_connpos_update() {
 			continue;
 		if (c->is_set_as_toplevel())
 			continue;
-
-		Size2i size = c->get_combined_minimum_size();
-
-		int y = sb->get_margin(MARGIN_TOP) + vofs;
-		int h = size.y;
-
+		
 		if (slot_info.has(idx)) {
-
+			OS::get_singleton()->print("%s \n", cache_y);
+			ERR_FAIL_COND(i >= cache_y.size());
 			if (slot_info[idx].enable_left) {
 				ConnCache cc;
-				cc.pos = Point2i(edgeofs, y + h / 2);
+				cc.pos = Point2i(edgeofs, cache_y[i] + sb->get_margin(MARGIN_TOP));
 				cc.type = slot_info[idx].type_left;
 				cc.color = slot_info[idx].color_left;
 				conn_input_cache.push_back(cc);
 			}
 			if (slot_info[idx].enable_right) {
 				ConnCache cc;
-				cc.pos = Point2i(get_size().width - edgeofs, y + h / 2);
+				cc.pos = Point2i(get_size().width - edgeofs, cache_y[i] + sb->get_margin(MARGIN_TOP));
 				cc.type = slot_info[idx].type_right;
 				cc.color = slot_info[idx].color_right;
 				conn_output_cache.push_back(cc);
 			}
 		}
-
-		if (vofs > 0)
-			vofs += sep;
-		vofs += size.y;
 		idx++;
 	}
 
