@@ -121,6 +121,10 @@ bool CSGShape::is_root_shape() const {
 	return !parent_shape;
 }
 
+Ref<ConcavePolygonShape> CSGShape::get_collision_shape() const {
+	return root_collision_shape;
+}
+
 void CSGShape::set_snap(float p_snap) {
 	snap = p_snap;
 }
@@ -628,6 +632,8 @@ void CSGShape::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("set_snap", "snap"), &CSGShape::set_snap);
 	ClassDB::bind_method(D_METHOD("get_snap"), &CSGShape::get_snap);
+
+	ClassDB::bind_method(D_METHOD("get_collision_shape"), &CSGShape::get_collision_shape);
 
 	ClassDB::bind_method(D_METHOD("set_use_collision", "operation"), &CSGShape::set_use_collision);
 	ClassDB::bind_method(D_METHOD("is_using_collision"), &CSGShape::is_using_collision);

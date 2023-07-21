@@ -150,6 +150,8 @@ public:
 	void set_snap(float p_snap);
 	float get_snap() const;
 
+	Ref<ConcavePolygonShape> get_collision_shape() const;
+
 	void set_calculate_tangents(bool p_calculate_tangents);
 	bool is_calculating_tangents() const;
 
