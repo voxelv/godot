@@ -152,6 +152,8 @@ public:
 
 	Ref<ConcavePolygonShape> get_collision_shape() const;
 
+	RID get_collision_body() const;
+
 	void set_calculate_tangents(bool p_calculate_tangents);
 	bool is_calculating_tangents() const;
 
